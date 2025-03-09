@@ -9,9 +9,10 @@ import (
 var config Config
 
 type Account struct {
-	APIKey    string `json:"api_key"`
-	SecretKey string `json:"secret_key"`
-	Switch    bool   `json:"switch"` // 是否启用
+	APIKey     string  `json:"api_key"`
+	SecretKey  string  `json:"secret_key"`
+	Switch     bool    `json:"switch"`     // 是否启用
+	Proportion float64 `json:"proportion"` // 下单比例
 }
 
 type Config struct {

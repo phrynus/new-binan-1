@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -85,7 +88,7 @@ func init() {
 func main() {
 	// 启动ws
 	go wsUserGo()
-	// 监听 OS 信号，优雅退出
+
 	sigC := make(chan os.Signal, 1)
 	signal.Notify(sigC, os.Interrupt, syscall.SIGTERM)
 	<-sigC
@@ -97,20 +100,10 @@ func main() {
 func wsUserGo() {
 	retryCount := 0
 	for {
-		wsHandler := func(event *futures.WsUserDataEvent) {
-			if config.Debug {
-				log.Println(event)
-			}
-		}
-		wsErrHandler := func(err error) {
-			if config.Debug {
-				log.Println("wsErrorHandler:", err)
-			}
+		doneC, _, err := futures.WsUserDataServe(listenKey, signalHandler, func(err error) {
 			time.Sleep(time.Duration(2<<retryCount) * time.Second)
-		}
-		doneC, _, err := futures.WsUserDataServe(listenKey, wsHandler, wsErrHandler)
+		})
 		if err != nil {
-			log.Fatal(err)
 			if config.Debug {
 				log.Println("WsUserGo 重试中...")
 			}
@@ -119,6 +112,88 @@ func wsUserGo() {
 		}
 		retryCount = 0
 		log.Println("开始监听")
-		<-doneC
+		if doneC != nil {
+			<-doneC
+		} else {
+			log.Println("Error: doneC is nil")
+		}
 	}
+}
+
+// 信号处理
+func signalHandler(event *futures.WsUserDataEvent) {
+	if event == nil {
+		log.Println("Warning: event is nil")
+		return
+	}
+	//取下单信号
+	if event.Event == "ORDER_TRADE_UPDATE" {
+		dataOrder := event.OrderTradeUpdate
+		if dataOrder.ExecutionType == "TRADE" && dataOrder.Status == "FILLED" {
+			if config.Debug {
+				//dataOrder转为json格式然后log
+				jsonData, err := json.Marshal(dataOrder)
+				if err == nil {
+					log.Println(string(jsonData))
+				}
+			}
+			orderMapping := map[bool]map[futures.SideType]int{
+				false: {"BUY": 1, "SELL": 2},
+				true:  {"SELL": 3, "BUY": 4},
+			}
+			// 1 多下单 2 多平单 3 空下单 4 空平单
+			orderStatus := orderMapping[dataOrder.IsReduceOnly][dataOrder.Side]
+			cFree, err := getBalance(client)
+			if err != nil {
+				log.Fatal(err)
+			}
+			if cFree <= 0 {
+				log.Fatal("资金为0")
+			}
+			// 成交u
+			accumulatedFilledQty, err := strconv.ParseFloat(dataOrder.AccumulatedFilledQty, 64)
+			lastFilledPrice, err := strconv.ParseFloat(dataOrder.LastFilledPrice, 64)
+			if err != nil {
+				return
+			}
+			// 订单 与账户的比例
+			costRatio := accumulatedFilledQty * lastFilledPrice / cFree
+
+			if config.Debug {
+				log.Printf("当前资金：%f", cFree)
+				log.Printf("订单状态：%d", orderStatus)
+				log.Printf("成本比例：%f", costRatio)
+				log.Printf("订单价格：%f", lastFilledPrice)
+				log.Printf("订单数量：%f", accumulatedFilledQty)
+			}
+			if config.IsFloatLoss && costRatio > config.FloatLoss && (orderStatus == 1 || orderStatus == 3) {
+				removeCostRatio := costRatio - config.FloatLoss
+				if config.Debug {
+					log.Printf("规划订单比例：%f", config.FloatLoss)
+					log.Printf("超出规划比例：%f", removeCostRatio)
+					log.Printf("剔除数量：%f", (1-(removeCostRatio/costRatio))*accumulatedFilledQty)
+				}
+			}
+
+		}
+	}
+}
+
+// 取账余额
+func getBalance(c *futures.Client) (free float64, err error) {
+	balance, err := c.NewGetBalanceService().Do(context.Background())
+	if err != nil {
+		return 0, err
+	}
+	for _, b := range balance {
+		if b.Asset == "USDT" {
+			// b.Balance 转为 float64
+			free, err = strconv.ParseFloat(b.Balance, 64)
+			if err != nil {
+				return 0, err
+			}
+			return free, nil
+		}
+	}
+	return 0, errors.New("no USDT balance")
 }
