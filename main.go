@@ -5,12 +5,14 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,13 +20,13 @@ import (
 )
 
 var (
-	client        *futures.Client
-	clients       []*futures.Client
-	httpClient    *http.Client
-	symbolsString []string
-	symbols       []futures.Symbol
-	listenKey     string
-	err           error
+	client            *futures.Client
+	clients           []*futures.Client
+	httpClient        *http.Client
+	symbolsInfo       []futures.Symbol
+	symbolsInfoString []string
+	listenKey         string
+	err               error
 )
 
 // 初始化
@@ -75,13 +77,13 @@ func init() {
 	// 赛选币种
 	for _, s := range info.Symbols {
 		if s.QuoteAsset == "USDT" && s.ContractType == "PERPETUAL" && s.Status == "TRADING" {
-			symbols = append(symbols, s)
-			symbolsString = append(symbolsString, s.BaseAsset)
+			symbolsInfo = append(symbolsInfo, s)
+			symbolsInfoString = append(symbolsInfoString, s.BaseAsset)
 		}
 	}
 	if config.Debug {
-		log.Println(symbols)
-		log.Println(symbolsString)
+		log.Println(symbolsInfo)
+		log.Println(symbolsInfoString)
 	}
 }
 
@@ -138,20 +140,26 @@ func signalHandler(event *futures.WsUserDataEvent) {
 				}
 			}
 			orderMapping := map[bool]map[futures.SideType]int{
-				false: {"BUY": 1, "SELL": 2},
-				true:  {"SELL": 3, "BUY": 4},
+				false: {"BUY": 1, "SELL": 3},
+				true:  {"SELL": 2, "BUY": 4},
 			}
 			// 1 多下单 2 多平单 3 空下单 4 空平单
 			orderStatus := orderMapping[dataOrder.IsReduceOnly][dataOrder.Side]
 			cFree, err := getBalance(client)
 			if err != nil {
-				log.Fatal(err)
+				log.Println(err)
+				return
 			}
 			if cFree <= 0 {
-				log.Fatal("资金为0")
+				log.Println("资金为0")
+				return
 			}
 			// 成交u
 			accumulatedFilledQty, err := strconv.ParseFloat(dataOrder.AccumulatedFilledQty, 64)
+			if err != nil {
+				return
+			}
+			//
 			lastFilledPrice, err := strconv.ParseFloat(dataOrder.LastFilledPrice, 64)
 			if err != nil {
 				return
@@ -166,6 +174,7 @@ func signalHandler(event *futures.WsUserDataEvent) {
 				log.Printf("订单价格：%f", lastFilledPrice)
 				log.Printf("订单数量：%f", accumulatedFilledQty)
 			}
+			// 订单数量超出
 			if config.IsFloatLoss && costRatio > config.FloatLoss && (orderStatus == 1 || orderStatus == 3) {
 				removeCostRatio := costRatio - config.FloatLoss
 				if config.Debug {
@@ -173,6 +182,30 @@ func signalHandler(event *futures.WsUserDataEvent) {
 					log.Printf("超出规划比例：%f", removeCostRatio)
 					log.Printf("剔除数量：%f", (1-(removeCostRatio/costRatio))*accumulatedFilledQty)
 				}
+				// 价格，数量
+				_, quantityGo, err := processSymbolInfo(dataOrder.Symbol, 0, (1-(removeCostRatio/costRatio))*accumulatedFilledQty)
+				if err != nil {
+					log.Println(err)
+					return
+				}
+				if quantityGo != "" {
+					var (
+						side         futures.SideType         = "SELL"
+						positionSide futures.PositionSideType = "LONG"
+					)
+					if orderStatus == 3 {
+						side = "BUY"
+						positionSide = "SHORT"
+					}
+					_, err := client.NewCreateOrderService().Symbol(dataOrder.Symbol).Type("MARKET").Side(side).PositionSide(positionSide).Quantity(quantityGo).Do(context.Background())
+					if err != nil {
+						log.Println(err)
+						return
+					}
+				}
+			}
+			for i, c := range clients {
+
 			}
 
 		}
@@ -187,7 +220,6 @@ func getBalance(c *futures.Client) (free float64, err error) {
 	}
 	for _, b := range balance {
 		if b.Asset == "USDT" {
-			// b.Balance 转为 float64
 			free, err = strconv.ParseFloat(b.Balance, 64)
 			if err != nil {
 				return 0, err
@@ -196,4 +228,57 @@ func getBalance(c *futures.Client) (free float64, err error) {
 		}
 	}
 	return 0, errors.New("no USDT balance")
+}
+
+// 处理币种数量和价格
+func processSymbolInfo(symbol string, p float64, q float64) (price string, quantity string, err error) {
+	var symbolInfo *futures.Symbol
+	for _, s := range symbolsInfo {
+		if s.Symbol == symbol {
+			symbolInfo = &s
+		}
+	}
+	if symbolInfo == nil {
+		return "", "", errors.New("symbolInfo is nil")
+	}
+	if config.Debug {
+		log.Println(symbolInfo)
+	}
+	if q != 0 {
+		quantity, err = takeDivisible(q, symbolInfo.Filters[1]["stepSize"].(string))
+		if err != nil {
+			return "", "", err
+		}
+	}
+	if p != 0 {
+		price, err = takeDivisible(p, symbolInfo.Filters[0]["tickSize"].(string))
+		if err != nil {
+			return "", "", err
+		}
+	}
+
+	return price, quantity, nil
+}
+
+// 调整小数位数并确保可以整除
+func takeDivisible(inputVal float64, divisor string) (string, error) {
+
+	divisorVal, err := strconv.ParseFloat(divisor, 64)
+	if err != nil || divisorVal == 0 {
+		return "", fmt.Errorf("无效的 divisor: %v", err)
+	}
+
+	// 计算小数点位数
+	decimalPlaces := 0
+	if dot := strings.Index(divisor, "."); dot != -1 {
+		decimalPlaces = len(divisor) - dot - 1
+	}
+
+	// 计算最大整除的值
+	quotient := int(inputVal / divisorVal)
+	maxDivisible := divisorVal * float64(quotient)
+
+	// 格式化输出
+	format := fmt.Sprintf("%%.%df", decimalPlaces)
+	return fmt.Sprintf(format, maxDivisible), nil
 }
