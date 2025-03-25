@@ -1,3 +1,11 @@
+// $env:GOOS = "linux"
+// $env:GOARCH = "amd64"
+// go build -o main-linux
+
+// $env:GOOS = $null
+// $env:GOARCH = $null
+// go build -o main-win.exe
+
 package main
 
 import (
@@ -90,6 +98,7 @@ func init() {
 func main() {
 	// 启动ws
 	go wsUserGo()
+	go riskGo()
 
 	sigC := make(chan os.Signal, 1)
 	signal.Notify(sigC, os.Interrupt, syscall.SIGTERM)
@@ -348,4 +357,20 @@ func takeDivisible(inputVal float64, divisor string) (string, error) {
 	// 格式化输出
 	format := fmt.Sprintf("%%.%df", decimalPlaces)
 	return fmt.Sprintf(format, maxDivisible), nil
+}
+
+// 风控
+func riskGo() {
+	for {
+		time.Sleep(time.Second * 5)
+		// 取 client 仓位信息
+		positions, err := client.NewGetPositionRiskService().Do(context.Background())
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		// for _, position := range positions {
+
+		// }
+	}
 }
