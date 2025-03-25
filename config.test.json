@@ -1,7 +1,7 @@
 {
   "api_key": "your-api-key",
   "secret_key": "your-secret-key",
-  "proxy": "http://127.0.0.1:7890",
+  "proxy": "",
   "floatLoss": 0.5,
   "isFloatLoss": true,
   "positionBalance": 0.1,
