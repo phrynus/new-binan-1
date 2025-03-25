@@ -225,7 +225,9 @@ func signalHandler(event *futures.WsUserDataEvent) {
 					log.Println("资金为0")
 					return
 				}
-				_, belowQuantityGo, err := processSymbolInfo(dataOrder.Symbol, 0, belowFree*belowCostRatio)
+				_, belowQuantityGo, err := processSymbolInfo(dataOrder.Symbol, 0, belowFree*belowCostRatio/lastFilledPrice)
+				// log belowFree*belowCostRatio
+				log.Println(belowFree * belowCostRatio)
 				if err != nil {
 					log.Println(err)
 					return
