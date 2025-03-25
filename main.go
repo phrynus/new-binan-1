@@ -143,6 +143,12 @@ func signalHandler(event *futures.WsUserDataEvent) {
 				false: {"BUY": 1, "SELL": 3},
 				true:  {"SELL": 2, "BUY": 4},
 			}
+			orderMapintSide := map[int]string{
+				1: "多下单",
+				2: "多平单",
+				3: "空下单",
+				4: "空平单",
+			}
 			// 1 多下单 2 多平单 3 空下单 4 空平单
 			orderStatus := orderMapping[dataOrder.IsReduceOnly][dataOrder.Side]
 			cFree, err := getBalance(client)
@@ -169,7 +175,7 @@ func signalHandler(event *futures.WsUserDataEvent) {
 
 			if config.Debug {
 				log.Printf("当前资金：%f", cFree)
-				log.Printf("订单状态：%d", orderStatus)
+				log.Printf("订单状态：%s", orderMapintSide[orderStatus])
 				log.Printf("成本比例：%f", costRatio)
 				log.Printf("订单价格：%f", lastFilledPrice)
 				log.Printf("订单数量：%f", accumulatedFilledQty)
@@ -203,11 +209,70 @@ func signalHandler(event *futures.WsUserDataEvent) {
 						return
 					}
 				}
+				// 下级配置
+				costRatio = config.FloatLoss
 			}
-			for i, c := range clients {
-
+			for i, clientBelow := range clients {
+				belowCostRatio := costRatio * config.Accounts[i].Proportion
+				log.Printf("下级：%d", i)
+				// 获取账户余额
+				belowFree, err := getBalance(clientBelow)
+				if err != nil {
+					log.Println(err)
+					return
+				}
+				if belowFree <= 0 {
+					log.Println("资金为0")
+					return
+				}
+				_, belowQuantityGo, err := processSymbolInfo(dataOrder.Symbol, 0, belowFree*belowCostRatio)
+				if err != nil {
+					log.Println(err)
+					return
+				}
+				if config.Debug {
+					log.Printf("资金：%f", belowFree)
+					log.Printf("比例：%f", belowCostRatio)
+					log.Printf("币种：%s", dataOrder.Symbol)
+					log.Printf("方向：%s", orderMapintSide[orderStatus])
+					log.Printf("数量：%s", belowQuantityGo)
+					log.Printf("价格：%f", lastFilledPrice)
+				}
+				var (
+					side         futures.SideType         = "BUY"
+					positionSide futures.PositionSideType = "LONG"
+				)
+				if belowQuantityGo != "" {
+					if orderStatus == 2 || orderStatus == 4 {
+						// 平掉 dataOrder.Symbol 所有仓位
+						if orderStatus == 2 {
+							side = "SELL"
+							positionSide = "LONG"
+						} else {
+							side = "BUY"
+							positionSide = "SHORT"
+						}
+						_, err := clientBelow.NewCreateOrderService().Symbol(dataOrder.Symbol).Type("MARKET").Side(side).PositionSide(positionSide).Quantity(belowQuantityGo).Do(context.Background())
+						if err != nil {
+							log.Println(err)
+							return
+						}
+					} else {
+						if orderStatus == 1 {
+							side = "BUY"
+							positionSide = "LONG"
+						} else {
+							side = "SELL"
+							positionSide = "SHORT"
+						}
+						_, err := clientBelow.NewCreateOrderService().Symbol(dataOrder.Symbol).Type("MARKET").Side(side).PositionSide(positionSide).Quantity(belowQuantityGo).Do(context.Background())
+						if err != nil {
+							log.Println(err)
+							return
+						}
+					}
+				}
 			}
-
 		}
 	}
 }
