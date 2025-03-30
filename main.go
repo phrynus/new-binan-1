@@ -361,16 +361,63 @@ func takeDivisible(inputVal float64, divisor string) (string, error) {
 
 // 风控
 func riskGo() {
-	for {
-		time.Sleep(time.Second * 5)
-		// 取 client 仓位信息
-		positions, err := client.NewGetPositionRiskService().Do(context.Background())
-		if err != nil {
-			log.Println(err)
-			return
+	if config.IsFloatLoss {
+		for {
+			time.Sleep(time.Second * 2)
+			// 获取账户余额
+			balance, err := getBalance(client)
+			if err != nil {
+				log.Println(err)
+				return
+			}
+			balanceFloatLoss := config.FloatLoss * balance
+			// 取 client 仓位信息
+			positions, err := client.NewGetPositionRiskService().Do(context.Background())
+			if err != nil {
+				log.Println(err)
+				return
+			}
+			for _, position := range positions {
+				positionAmt, err := strconv.ParseFloat(position.PositionAmt, 64)
+				if err != nil {
+					log.Println(err)
+					return
+				}
+				if positionAmt > 0 { // 全仓
+					unRealizedProfit, err := strconv.ParseFloat(position.UnRealizedProfit, 64)
+					if err != nil {
+						log.Println(err)
+						return
+					}
+					if config.Debug {
+						log.Println(position, unRealizedProfit < -balanceFloatLoss, unRealizedProfit, -balanceFloatLoss)
+					}
+					//如果亏损大于 balanceFloatLoss 则平仓
+					if unRealizedProfit < -balanceFloatLoss {
+						if config.Debug {
+							log.Println("亏损大于设定值，平仓")
+							log.Printf("当前资金：%f", balance)
+							log.Printf("亏损金额：%f", unRealizedProfit)
+							log.Printf("设定亏损：%f", -balanceFloatLoss)
+							log.Printf("币种：%s", position.Symbol)
+							log.Printf("方向：%s", position.PositionSide)
+						}
+						//	平
+						if position.PositionSide == "LONG" {
+							_, err := client.NewCreateOrderService().Symbol(position.Symbol).Type("MARKET").Side("SELL").PositionSide("LONG").Quantity(position.PositionAmt).Do(context.Background())
+							if err != nil {
+								log.Println(err)
+							}
+						} else {
+							_, err := client.NewCreateOrderService().Symbol(position.Symbol).Type("MARKET").Side("BUY").PositionSide("SHORT").Quantity(position.PositionAmt).Do(context.Background())
+							if err != nil {
+								log.Println(err)
+							}
+						}
+					}
+				}
+			}
 		}
-		// for _, position := range positions {
-
-		// }
 	}
+
 }
